@@ -1,0 +1,30 @@
+# 環境變數（含 API Key）
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 使用者資料與快取（機密金融文件）
+data/uploads/
+data/page_images/
+data/vision_cache/
+data/processed/
+
+# 向量索引
+vectorstore/
+
+# 評估資料（含機密金融問答）
+evaluation/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
