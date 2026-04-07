@@ -8,7 +8,6 @@ from prompts.templates import UNIFIED_QA_PROMPT
 from config import RELEVANCE_THRESHOLD, ENABLE_GROUNDING_CHECK, RETRIEVE_K, RERANK_TOP_K
 
 # 動態載入競爭公司（從 entities.json 中排除當前公司）
-PREDICTION_KEYWORDS = ["預測", "預估", "預計將", "未來", "明年", "後年"]
 
 
 def _load_rival_companies(current_company: str = None) -> list[str]:
@@ -139,13 +138,10 @@ class RAGChain:
         }
 
     def _check_scope(self, question: str) -> Optional[str]:
-        """Scope check：其他公司 / 預測未來"""
+        """Scope check：僅過濾其他公司相關問題"""
         for company in self.rival_companies:
             if company in question:
                 return f"此為{company}相關問題，超出年報範圍"
-        for kw in PREDICTION_KEYWORDS:
-            if kw in question:
-                return "年報為歷史資料，無法提供未來預測"
         return None
 
     def _build_refusal(self, question: str, reason: str) -> dict:

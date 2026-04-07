@@ -96,8 +96,11 @@ class PDFParser:
 
         # 檢查快取
         if os.path.exists(cache_path):
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return f.read()
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                os.remove(cache_path)  # 編碼損壞，刪除後重新提取
 
         try:
             from google import genai

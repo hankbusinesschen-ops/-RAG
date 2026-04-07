@@ -141,6 +141,16 @@ def main():
         st.session_state.current_docs = []
     if "chunks" not in st.session_state:
         st.session_state.chunks = None
+    if "eval_items_df" not in st.session_state:
+        st.session_state.eval_items_df = pd.DataFrame([
+            {"問題": "", "預期答案（選填）": "", "Context 提示（選填）": ""}
+        ])
+    if "eval_results" not in st.session_state:
+        st.session_state.eval_results = None
+    if "eval_n_repeats" not in st.session_state:
+        st.session_state.eval_n_repeats = 1
+    if "eval_selected_metrics" not in st.session_state:
+        st.session_state.eval_selected_metrics = ["AnswerRelevancy"]
 
     # ===== 側邊欄 =====
     with st.sidebar:
@@ -316,7 +326,7 @@ def main():
                 st.caption(f"共 {len(st.session_state.chunks)} 個文件片段")
 
     # ===== 主頁面 =====
-    tab1, tab2, tab3 = st.tabs(["💬 問答", "📊 批次評估", "🔍 系統資訊"])
+    tab1, tab3 = st.tabs(["💬 問答", "🔍 系統資訊"])
 
     with tab1:
         # 使用固定高度容器讓訊息區域可捲動，輸入框不會被推到頁面底部
@@ -426,94 +436,246 @@ def main():
                     "risk": risk
                 })
 
-    with tab2:
-        st.subheader("問答集批次評估")
+    if False:  # 暫時隱藏批次評估 tab
+      with tab2:
+        st.subheader("動態批次評估（DeepEval）")
 
         if not st.session_state.rag_chain:
             st.warning("請先建立索引後才能進行評估")
         else:
-            qa_pairs = load_qa_pairs()
-            if not qa_pairs:
-                st.warning(f"找不到問答集檔案：{QA_PAIRS_PATH}")
-                st.info("請將問答集 JSON 檔案放入 evaluation/ 目錄")
-            else:
-                st.info(f"共有 {len(qa_pairs)} 題")
+            # ── 區塊 A：題目輸入 ─────────────────────────────────
+            st.markdown("### 題目清單")
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    start_idx = st.number_input("從第幾題開始", 1, len(qa_pairs), 1) - 1
-                with col2:
-                    end_idx = st.number_input("到第幾題結束", 1, len(qa_pairs), len(qa_pairs))
+            col_import, col_export = st.columns(2)
+            with col_import:
+                uploaded_qa = st.file_uploader(
+                    "匯入題目 JSON",
+                    type=["json"],
+                    key="qa_import",
+                    help='格式：[{"問題": "...", "預期答案（選填）": "...", "Context 提示（選填）": "..."}]'
+                )
+                if uploaded_qa:
+                    try:
+                        imported = json.loads(uploaded_qa.read())
+                        # 相容舊格式（question/answer）
+                        normalized = []
+                        for it in imported:
+                            normalized.append({
+                                "問題": it.get("問題") or it.get("question", ""),
+                                "預期答案（選填）": it.get("預期答案（選填）") or it.get("answer") or it.get("expected_answer", ""),
+                                "Context 提示（選填）": it.get("Context 提示（選填）") or it.get("context_hint", ""),
+                            })
+                        st.session_state.eval_items_df = pd.DataFrame(normalized)
+                        st.session_state.eval_results = None
+                        st.success(f"已匯入 {len(normalized)} 題")
+                    except Exception as e:
+                        st.error(f"匯入失敗：{e}")
 
-                selected_qa = qa_pairs[start_idx:end_idx]
+            with col_export:
+                if not st.session_state.eval_items_df.empty:
+                    export_json = json.dumps(
+                        st.session_state.eval_items_df.to_dict(orient="records"),
+                        ensure_ascii=False, indent=2
+                    )
+                    st.download_button(
+                        "匯出題目 JSON",
+                        data=export_json,
+                        file_name="eval_questions.json",
+                        mime="application/json",
+                    )
 
-                if st.button("🚀 開始評估", type="primary"):
-                    evaluator = Evaluator(st.session_state.rag_chain,
-                                          st.session_state.llm)
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+            edited_df = st.data_editor(
+                st.session_state.eval_items_df,
+                column_config={
+                    "問題": st.column_config.TextColumn("問題 *", width="large", required=True),
+                    "預期答案（選填）": st.column_config.TextColumn("預期答案（選填）", width="large"),
+                    "Context 提示（選填）": st.column_config.TextColumn("Context 提示（選填）", width="medium"),
+                },
+                num_rows="dynamic",
+                use_container_width=True,
+                key="eval_data_editor",
+            )
+            st.session_state.eval_items_df = edited_df
 
-                    def eval_progress(pct):
-                        progress_bar.progress(pct)
-                        status_text.text(f"評估進度：{pct:.0%}")
+            st.divider()
 
-                    report = evaluator.evaluate_all(selected_qa, eval_progress)
-                    progress_bar.empty()
-                    status_text.empty()
+            # ── 區塊 B：評估設定 ─────────────────────────────────
+            st.markdown("### 評估設定")
+            col_repeat, col_metrics = st.columns([1, 2])
 
-                    # 顯示結果
-                    st.success("評估完成！")
+            with col_repeat:
+                n_repeats = st.slider(
+                    "每題重複次數",
+                    min_value=1, max_value=5, value=1,
+                    help="重複執行以觀察回答一致性，設 1 最快"
+                )
 
-                    # 指標
-                    cols = st.columns(3)
-                    cols[0].metric("整體正確率",
-                                   f"{report['overall_accuracy']:.1%}")
-                    cols[1].metric("答對題數",
-                                   f"{report['correct']}/{report['total']}")
-                    cols[2].metric("答錯題數",
-                                   f"{report['total'] - report['correct']}")
+            with col_metrics:
+                st.write("**選擇 DeepEval 指標：**")
+                metric_options = {
+                    "AnswerRelevancy":     "回答相關性（只需問題 + 回答）",
+                    "Faithfulness":        "忠實性（需要 retrieval context）",
+                    "ContextualRelevancy": "檢索相關性（需要 retrieval context）",
+                    "ContextualRecall":    "檢索召回率（需要預期答案 + retrieval context）",
+                    "GEval_Correctness":   "GEval 正確性（需要預期答案）",
+                }
+                selected_metrics = []
+                for m_key, m_desc in metric_options.items():
+                    default = m_key in st.session_state.eval_selected_metrics
+                    if st.checkbox(m_desc, key=f"metric_{m_key}", value=default):
+                        selected_metrics.append(m_key)
+                st.session_state.eval_selected_metrics = selected_metrics
 
-                    # 各類別正確率
-                    st.subheader("各類別正確率")
-                    cat_data = []
-                    for cat, stats in report["by_category"].items():
-                        cat_data.append({
-                            "類別": cat,
-                            "正確率": f"{stats['accuracy']:.1%}",
-                            "答對": stats["correct"],
-                            "總題數": stats["total"]
-                        })
-                    if cat_data:
-                        st.dataframe(pd.DataFrame(cat_data), width="stretch")
+            if not selected_metrics:
+                st.warning("請至少選擇一個評估指標")
 
-                    # 詳細結果
-                    st.subheader("詳細結果")
-                    detail_df = pd.DataFrame(report["details"])
-                    display_cols = ["id", "category", "question",
-                                    "expected_answer", "actual_answer",
-                                    "is_correct", "hallucination_risk"]
-                    available_cols = [c for c in display_cols if c in detail_df.columns]
-                    st.dataframe(detail_df[available_cols], width="stretch")
+            # 提示：需要預期答案的 metric 但有空白題
+            needs_expected_selected = {"ContextualRecall", "GEval_Correctness"}.intersection(set(selected_metrics))
+            if needs_expected_selected:
+                missing_expected = [
+                    i + 1 for i, row in edited_df.iterrows()
+                    if str(row.get("問題", "")).strip() and not str(row.get("預期答案（選填）", "")).strip()
+                ]
+                if missing_expected:
+                    st.info(f"題目 {missing_expected} 未填預期答案，{', '.join(needs_expected_selected)} 將自動跳過。")
 
-                    # 儲存報告
-                    report_path = "evaluation/results/latest_report.json"
-                    os.makedirs("evaluation/results", exist_ok=True)
-                    evaluator.save_report(report, report_path)
-                    st.info(f"報告已儲存至 {report_path}")
+            st.divider()
+
+            # ── 區塊 C：執行評估 ─────────────────────────────────
+            valid_rows = edited_df[
+                edited_df["問題"].fillna("").astype(str).str.strip().ne("")
+            ]
+            run_disabled = valid_rows.empty or not selected_metrics
+
+            if run_disabled:
+                if valid_rows.empty:
+                    st.caption("⚠️ 請在上方表格輸入至少一個問題")
+                if not selected_metrics:
+                    st.caption("⚠️ 請至少勾選一個評估指標")
+
+            if st.button("🚀 開始評估", type="primary", disabled=run_disabled):
+                from src.deepeval_evaluator import DeepEvalEvaluator, EvaluationItem
+
+                evaluator = DeepEvalEvaluator(
+                    st.session_state.rag_chain,
+                    st.session_state.llm,
+                )
+
+                eval_items = [
+                    EvaluationItem(
+                        question=str(row["問題"]).strip(),
+                        expected_answer=str(row.get("預期答案（選填）", "")).strip() or None,
+                        context_hint=str(row.get("Context 提示（選填）", "")).strip() or None,
+                    )
+                    for _, row in valid_rows.iterrows()
+                ]
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def on_progress(pct):
+                    progress_bar.progress(pct)
+                    status_text.text(f"評估進度：{pct:.0%}（共 {len(eval_items)} 題 × {n_repeats} 次）")
+
+                results = evaluator.run_evaluation(
+                    qa_items=eval_items,
+                    selected_metrics=selected_metrics,
+                    n_repeats=n_repeats,
+                    progress_callback=on_progress,
+                )
+
+                progress_bar.empty()
+                status_text.empty()
+                st.session_state.eval_results = results
+                st.session_state.eval_n_repeats = n_repeats
+                st.success(f"✅ 評估完成！共 {len(results)} 題")
+
+            # ── 區塊 D：結果展示 ─────────────────────────────────
+            if st.session_state.eval_results:
+                results = st.session_state.eval_results
+                saved_n_repeats = st.session_state.eval_n_repeats
+                st.markdown("### 評估結果")
+
+                # 頂部摘要：各 metric 平均分數
+                all_metric_names = list(results[0].mean_scores.keys()) if results else []
+                if all_metric_names:
+                    summary_cols = st.columns(len(all_metric_names))
+                    for col, m_name in zip(summary_cols, all_metric_names):
+                        vals = [r.mean_scores.get(m_name) for r in results
+                                if r.mean_scores.get(m_name) is not None]
+                        avg = sum(vals) / len(vals) if vals else None
+                        col.metric(m_name, f"{avg:.3f}" if avg is not None else "N/A")
+
+                st.markdown("#### 各題詳情")
+                for i, item_result in enumerate(results):
+                    q_preview = item_result.item.question[:40]
+                    with st.expander(f"題目 {i + 1}：{q_preview}{'...' if len(item_result.item.question) > 40 else ''}"):
+                        st.markdown(f"**問題：** {item_result.item.question}")
+                        if item_result.item.expected_answer:
+                            st.markdown(f"**預期答案：** {item_result.item.expected_answer}")
+                        if item_result.item.context_hint:
+                            st.caption(f"Context 提示：{item_result.item.context_hint}")
+
+                        if saved_n_repeats > 1:
+                            st.markdown(f"**一致性分數：** `{item_result.consistency_score:.3f}`")
+                            run_tabs = st.tabs([f"Run {r + 1}" for r in range(len(item_result.runs))])
+                            for tab_r, run in zip(run_tabs, item_result.runs):
+                                with tab_r:
+                                    st.markdown(f"**回答：** {run.actual_answer}")
+                                    st.caption(f"幻覺風險：{run.hallucination_risk}")
+                                    score_data = [
+                                        {
+                                            "指標": m,
+                                            "分數": f"{s:.3f}" if s is not None else "跳過",
+                                            "說明": run.metric_reasons.get(m, ""),
+                                        }
+                                        for m, s in run.metric_scores.items()
+                                    ]
+                                    st.dataframe(pd.DataFrame(score_data), use_container_width=True, hide_index=True)
+                        else:
+                            run = item_result.runs[0]
+                            st.markdown(f"**回答：** {run.actual_answer}")
+                            st.caption(f"幻覺風險：{run.hallucination_risk}")
+                            score_data = [
+                                {
+                                    "指標": m,
+                                    "分數": f"{s:.3f}" if s is not None else "跳過",
+                                    "說明": run.metric_reasons.get(m, ""),
+                                }
+                                for m, s in run.metric_scores.items()
+                            ]
+                            st.dataframe(pd.DataFrame(score_data), use_container_width=True, hide_index=True)
+
+                        if item_result.runs[0].retrieval_context:
+                            with st.expander("📄 Retrieval Context"):
+                                for ctx in item_result.runs[0].retrieval_context:
+                                    st.text(ctx[:300] + ("..." if len(ctx) > 300 else ""))
+                                    st.divider()
+
+                # 匯出完整結果
+                from src.deepeval_evaluator import DeepEvalEvaluator
+                _exporter = DeepEvalEvaluator(st.session_state.rag_chain, st.session_state.llm)
+                export_data = _exporter.to_export_dict(results)
+                st.download_button(
+                    "💾 匯出完整結果 JSON",
+                    data=json.dumps(export_data, ensure_ascii=False, indent=2),
+                    file_name="eval_results.json",
+                    mime="application/json",
+                )
 
     with tab3:
         st.subheader("系統架構")
         st.markdown("""
         | 元件 | 技術 |
         |------|------|
-        | **Embedding** | Gemini text-embedding-004 (非對稱：doc/query 分離) |
-        | **LLM** | Gemini 2.0 Flash |
+        | **Embedding** | Gemini Embedding 2 Preview (非對稱：doc/query 分離) |
+        | **LLM** | Gemini 3 Flash Preview |
         | **向量資料庫** | FAISS |
-        | **Reranker** | BAAI/bge-reranker-v2-m3 (Cross-Encoder) |
+        | **Reranker** | Gemini LLM Reranker（零本地記憶體） |
         | **框架** | LangChain |
         | **前端** | Streamlit |
         | **PDF 解析** | PyMuPDF + pdfplumber |
-        | **檢索策略** | FAISS 語意 + BM25 關鍵字 → RRF 融合 → Cross-Encoder Rerank |
+        | **檢索策略** | FAISS 語意 + BM25 關鍵字 → RRF 融合 → LLM Rerank |
         | **架構** | Hybrid Search → Rerank → Page Expansion → LLM → Grounding Check |
         """)
 
